@@ -1,8 +1,18 @@
 
+
 # COAR Notify Integration
 
 The official documentation on how to configure the COAR Notify feature is available at [Lyrasis: COAR Notify - LDN Services Integration](https://wiki.lyrasis.org/display/DSDOC8x/COAR+Notify+-+LDN+Services)
 This repository keeps the two patch files to be installed on DSpace 7 to enable/configure the Notify feature.
+
+
+## How to install the patch files
+1. First move to the branch you want to install the patch on i.e. `git checkout <my-dspace-branch>`
+2. Then run the following command `git apply <path-of-patch-file>`
+3. Once the patch is applied you will need to add all the newly added/modified files to git with `git add *`
+4. Then commit the patch changes with `git commit -m 'Installed COAR Notify patch for DSpace 7.6.1'`
+5. Push the changes to your remote
+
 
 ## Basic Steps to Enable the LDN Feature
 
