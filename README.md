@@ -1,7 +1,4 @@
 
-
-Di seguito è riportato il testo formattato con i blocchi di codice appropriati per il tuo esempio:
-
 # COAR Notify Integration
 
 The official documentation on how to configure the COAR Notify feature is available at [Lyrasis: COAR Notify - LDN Services Integration](https://wiki.lyrasis.org/display/DSDOC8x/COAR+Notify+-+LDN+Services)
