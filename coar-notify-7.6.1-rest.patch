@@ -75,10 +75,10 @@ index 0000000000..44dd5389d3
 +}
 diff --git a/dspace-api/src/main/java/org/dspace/app/ldn/LDNMessageConsumer.java b/dspace-api/src/main/java/org/dspace/app/ldn/LDNMessageConsumer.java
 new file mode 100644
-index 0000000000..9e03cf7392
+index 0000000000..210aaa6c9c
 --- /dev/null
 +++ b/dspace-api/src/main/java/org/dspace/app/ldn/LDNMessageConsumer.java
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,243 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -244,6 +244,9 @@ index 0000000000..9e03cf7392
 +        ldn.addArgument(generateBitstreamDownloadUrl(item));
 +        ldn.addArgument(getBitstreamMimeType(findPrimaryBitstream(item)));
 +        ldn.addArgument(ldnMessage.getID());
++        ldn.addArgument(getRelationUri(item));
++        ldn.addArgument("http://purl.org/vocab/frbr/core#supplement");
++        ldn.addArgument(format("urn:uuid:%s", UUID.randomUUID()));
 +
 +        ldnMessage.setMessage(ldn.generateLDNMessage());
 +    }
@@ -254,6 +257,15 @@ index 0000000000..9e03cf7392
 +
 +    private String getIdentifierUri(Item item) {
 +        return itemService.getMetadataByMetadataString(item, "dc.identifier.uri")
++                          .stream()
++                          .findFirst()
++                          .map(MetadataValue::getValue)
++                          .orElse("");
++    }
++
++    private String getRelationUri(Item item) {
++        String relationMetadata = configurationService.getProperty("ldn.notify.relation.metadata", "dc.relation");
++        return itemService.getMetadataByMetadataString(item, relationMetadata)
 +                          .stream()
 +                          .findFirst()
 +                          .map(MetadataValue::getValue)
@@ -1622,10 +1634,10 @@ index 0000000000..b87001f815
 \ No newline at end of file
 diff --git a/dspace-api/src/main/java/org/dspace/app/ldn/action/LDNRelationCorrectionAction.java b/dspace-api/src/main/java/org/dspace/app/ldn/action/LDNRelationCorrectionAction.java
 new file mode 100644
-index 0000000000..0c2f5dfc17
+index 0000000000..f11a42ab2f
 --- /dev/null
 +++ b/dspace-api/src/main/java/org/dspace/app/ldn/action/LDNRelationCorrectionAction.java
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,110 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -1638,6 +1650,7 @@ index 0000000000..0c2f5dfc17
 +import java.math.BigDecimal;
 +import java.sql.SQLException;
 +import java.util.Date;
++import java.util.Set;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
 +import org.apache.logging.log4j.LogManager;
@@ -1685,7 +1698,12 @@ index 0000000000..0c2f5dfc17
 +        QAEvent qaEvent = null;
 +        if (notification.getObject() != null) {
 +            NotifyMessageDTO message = new NotifyMessageDTO();
-+            message.setHref(notification.getObject().getAsSubject());
++            if (notification.getType().containsAll(Set.of("Announce",
++                "coar-notify:RelationshipAction"))) {
++                message.setHref(notification.getObject().getAsSubject());
++            } else {
++                message.setHref(notification.getObject().getAsObject());
++            }
 +            message.setRelationship(notification.getObject().getAsRelationship());
 +            if (notification.getOrigin() != null) {
 +                message.setServiceId(notification.getOrigin().getId());
@@ -3654,10 +3672,10 @@ index 0000000000..a5ef0957ff
 \ No newline at end of file
 diff --git a/dspace-api/src/main/java/org/dspace/app/ldn/processor/LDNMetadataProcessor.java b/dspace-api/src/main/java/org/dspace/app/ldn/processor/LDNMetadataProcessor.java
 new file mode 100644
-index 0000000000..223c8b7a34
+index 0000000000..43c50173ee
 --- /dev/null
 +++ b/dspace-api/src/main/java/org/dspace/app/ldn/processor/LDNMetadataProcessor.java
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,231 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -3673,6 +3691,7 @@ index 0000000000..223c8b7a34
 +import java.util.ArrayList;
 +import java.util.List;
 +import java.util.Objects;
++import java.util.Set;
 +import java.util.UUID;
 +
 +import org.apache.http.HttpStatus;
@@ -3682,6 +3701,7 @@ index 0000000000..223c8b7a34
 +import org.dspace.app.ldn.action.LDNAction;
 +import org.dspace.app.ldn.action.LDNActionStatus;
 +import org.dspace.app.ldn.model.Notification;
++import org.dspace.app.ldn.service.LDNMessageService;
 +import org.dspace.app.ldn.utility.LDNUtils;
 +import org.dspace.content.DSpaceObject;
 +import org.dspace.content.Item;
@@ -3689,6 +3709,7 @@ index 0000000000..223c8b7a34
 +import org.dspace.core.Constants;
 +import org.dspace.core.Context;
 +import org.dspace.handle.service.HandleService;
++import org.dspace.services.ConfigurationService;
 +import org.springframework.beans.factory.annotation.Autowired;
 +
 +/**
@@ -3701,6 +3722,30 @@ index 0000000000..223c8b7a34
 +
 +    @Autowired
 +    private ItemService itemService;
++
++    @Autowired
++    private LDNMessageService ldnMessageService;
++
++    @Autowired
++    private ConfigurationService configurationService;
++
++    private static final Set<String> OBJECT_SUBJECT_ITEM_TYPES = Set.of(
++        "Announce",
++        "coar-notify:RelationshipAction");
++
++    private static final Set<String> CONTEXT_ID_ITEM_TYPES = Set.of(
++        "Announce",
++        "TentativeReject",
++        "Accept",
++        "coar-notify:ReviewAction",
++        "coar-notify:IngestAction",
++        "coar-notify:EndorsementAction");
++
++    private static final Set<String> OBJECT_ID_ITEM_TYPES = Set.of(
++        "Offer",
++        "coar-notify:ReviewAction",
++        "coar-notify:EndorsementAction",
++        "coar-notify:IngestAction");
 +
 +    @Autowired
 +    private HandleService handleService;
@@ -3798,16 +3843,35 @@ index 0000000000..223c8b7a34
 +     */
 +    private Item lookupItem(Context context, Notification notification) throws SQLException, HttpResponseException {
 +        Item item = null;
-+
 +        String url = null;
-+        if (notification.getContext() != null) {
++
++        if (CONTEXT_ID_ITEM_TYPES.containsAll(notification.getType())) {
 +            url = notification.getContext().getId();
-+        } else {
++        } else if (OBJECT_ID_ITEM_TYPES.containsAll(notification.getType())) {
 +            url = notification.getObject().getId();
++        } else if (OBJECT_SUBJECT_ITEM_TYPES.containsAll(notification.getType())) {
++            // need to understand if we're sender or receiver
++            if (ldnMessageService.isTargetCurrent(notification)) {
++                // this means we're sending the notification
++                url = notification.getObject().getAsObject();
++                // use as:object for sender
++            } else {
++                // this means we're receiving the notification
++                url = notification.getObject().getAsSubject();
++                // use as:subject for receiver
++            }
 +        }
 +
 +        log.info("Looking up item {}", url);
 +
++        item = resolveItemByUrl(context, url, notification);
++
++        return item;
++    }
++
++    private Item resolveItemByUrl(Context context, String url, Notification notification)
++        throws SQLException, HttpResponseException {
++        Item item = null;
 +        if (LDNUtils.hasUUIDInURL(url)) {
 +            UUID uuid = LDNUtils.getUUIDFromURL(url);
 +
@@ -3815,32 +3879,30 @@ index 0000000000..223c8b7a34
 +
 +            if (Objects.isNull(item)) {
 +                throw new HttpResponseException(HttpStatus.SC_NOT_FOUND,
-+                        format("Item with uuid %s not found", uuid));
++                    format("Item with uuid %s not found", uuid));
 +            }
++            return item;
++        }
++        String handle = handleService.resolveUrlToHandle(context, url);
 +
-+        } else {
-+            String handle = handleService.resolveUrlToHandle(context, url);
-+
-+            if (Objects.isNull(handle)) {
-+                throw new HttpResponseException(HttpStatus.SC_NOT_FOUND,
-+                        format("Handle not found for %s", url));
-+            }
-+
-+            DSpaceObject object = handleService.resolveToObject(context, handle);
-+
-+            if (Objects.isNull(object)) {
-+                throw new HttpResponseException(HttpStatus.SC_NOT_FOUND,
-+                        format("Item with handle %s not found", handle));
-+            }
-+
-+            if (object.getType() == Constants.ITEM) {
-+                item = (Item) object;
-+            } else {
-+                throw new HttpResponseException(HttpStatus.SC_UNPROCESSABLE_ENTITY,
-+                        format("Handle %s does not resolve to an item", handle));
-+            }
++        if (Objects.isNull(handle)) {
++            throw new HttpResponseException(HttpStatus.SC_NOT_FOUND,
++                format("Handle not found for %s", url));
 +        }
 +
++        DSpaceObject object = handleService.resolveToObject(context, handle);
++
++        if (Objects.isNull(object)) {
++            throw new HttpResponseException(HttpStatus.SC_NOT_FOUND,
++                format("Item with handle %s not found", handle));
++        }
++
++        if (object.getType() == Constants.ITEM) {
++            item = (Item) object;
++        } else {
++            throw new HttpResponseException(HttpStatus.SC_UNPROCESSABLE_ENTITY,
++                format("Handle %s does not resolve to an item", handle));
++        }
 +        return item;
 +    }
 +
@@ -3880,10 +3942,10 @@ index 0000000000..279ec5cedc
 \ No newline at end of file
 diff --git a/dspace-api/src/main/java/org/dspace/app/ldn/service/LDNMessageService.java b/dspace-api/src/main/java/org/dspace/app/ldn/service/LDNMessageService.java
 new file mode 100644
-index 0000000000..d200f0ce84
+index 0000000000..eb18c6a69a
 --- /dev/null
 +++ b/dspace-api/src/main/java/org/dspace/app/ldn/service/LDNMessageService.java
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,165 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -3984,8 +4046,9 @@ index 0000000000..d200f0ce84
 +     * 
 +     * @return number of messages fixed
 +     * @param context The DSpace context
++     * @throws SQLException
 +     */
-+    public int checkQueueMessageTimeout(Context context);
++    public int checkQueueMessageTimeout(Context context) throws SQLException;
 +
 +    /**
 +     * Elaborates the oldest enqueued message
@@ -4040,6 +4103,13 @@ index 0000000000..d200f0ce84
 +     * @param sourceIp the ip to evaluate
 +     */
 +    public boolean isValidIp(NotifyServiceEntity origin, String sourceIp);
++
++    /**
++     * check if the notification is targeting the current system
++     * 
++     * @param notification   the LDN Message entity
++     */
++    boolean isTargetCurrent(Notification notification);
 +}
 diff --git a/dspace-api/src/main/java/org/dspace/app/ldn/service/NotifyPatternToTriggerService.java b/dspace-api/src/main/java/org/dspace/app/ldn/service/NotifyPatternToTriggerService.java
 new file mode 100644
@@ -4312,10 +4382,10 @@ index 0000000000..8cd92d45dd
 +}
 diff --git a/dspace-api/src/main/java/org/dspace/app/ldn/service/impl/LDNMessageServiceImpl.java b/dspace-api/src/main/java/org/dspace/app/ldn/service/impl/LDNMessageServiceImpl.java
 new file mode 100644
-index 0000000000..20a7cb017f
+index 0000000000..15f07a5561
 --- /dev/null
 +++ b/dspace-api/src/main/java/org/dspace/app/ldn/service/impl/LDNMessageServiceImpl.java
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,404 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -4329,9 +4399,11 @@ index 0000000000..20a7cb017f
 +import java.net.UnknownHostException;
 +import java.sql.SQLException;
 +import java.util.ArrayList;
++import java.util.Collection;
 +import java.util.Collections;
 +import java.util.Date;
 +import java.util.List;
++import java.util.Optional;
 +import java.util.Set;
 +import java.util.UUID;
 +
@@ -4421,7 +4493,19 @@ index 0000000000..20a7cb017f
 +    @Override
 +    public LDNMessageEntity create(Context context, Notification notification, String sourceIp) throws SQLException {
 +        LDNMessageEntity ldnMessage = create(context, notification.getId());
-+        ldnMessage.setObject(findDspaceObjectByUrl(context, notification.getObject().getId()));
++        DSpaceObject obj = findDspaceObjectByUrl(context, notification.getObject().getId());
++        if (obj == null) {
++            if (isTargetCurrent(notification)) {
++                // this means we're sending the notification
++                obj = findDspaceObjectByUrl(context, notification.getObject().getAsObject());
++                // use as:object for sender
++            } else {
++                // this means we're receiving the notification
++                obj = findDspaceObjectByUrl(context, notification.getObject().getAsSubject());
++                // use as:subject for receiver
++            }
++        }
++        ldnMessage.setObject(obj);
 +        if (null != notification.getContext()) {
 +            ldnMessage.setContext(findDspaceObjectByUrl(context, notification.getContext().getId()));
 +        }
@@ -4518,17 +4602,17 @@ index 0000000000..20a7cb017f
 +    private DSpaceObject findDspaceObjectByUrl(Context context, String url) throws SQLException {
 +        String dspaceUrl = configurationService.getProperty("dspace.ui.url") + "/handle/";
 +
-+        if (url.startsWith(dspaceUrl)) {
++        if (StringUtils.startsWith(url, dspaceUrl)) {
 +            return handleService.resolveToObject(context, url.substring(dspaceUrl.length()));
 +        }
 +
 +        String handleResolver = configurationService.getProperty("handle.canonical.prefix", "https://hdl.handle.net/");
-+        if (url.startsWith(handleResolver)) {
++        if (StringUtils.startsWith(url, handleResolver)) {
 +            return handleService.resolveToObject(context, url.substring(handleResolver.length()));
 +        }
 +
 +        dspaceUrl = configurationService.getProperty("dspace.ui.url") + "/items/";
-+        if (url.startsWith(dspaceUrl)) {
++        if (StringUtils.startsWith(url, dspaceUrl)) {
 +            return itemService.find(context, UUID.fromString(url.substring(dspaceUrl.length())));
 +        }
 +
@@ -4564,93 +4648,77 @@ index 0000000000..20a7cb017f
 +
 +    @Override
 +    public int extractAndProcessMessageFromQueue(Context context) throws SQLException {
-+        int result = 0;
-+        int timeoutInMinutes = configurationService.getIntProperty("ldn.processor.queue.msg.timeout");
-+        if (timeoutInMinutes == 0) {
-+            timeoutInMinutes = 60;
-+        }
-+        List<LDNMessageEntity> msgs = new ArrayList<LDNMessageEntity>();
-+        try {
-+            msgs.addAll(findOldestMessagesToProcess(context));
-+            msgs.addAll(findMessagesToBeReprocessed(context));
-+            if (msgs != null && msgs.size() > 0) {
-+                LDNMessageEntity msg = null;
-+                LDNProcessor processor = null;
-+                for (int i = 0; processor == null && i < msgs.size() && msgs.get(i) != null; i++) {
-+                    processor = ldnRouter.route(msgs.get(i));
-+                    msg = msgs.get(i);
-+                    if (processor == null) {
-+                        log.info(
-+                            "No processor found for LDN message " + msgs.get(i));
-+                        msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_UNMAPPED_ACTION);
-+                        msg.setQueueAttempts(msg.getQueueAttempts() + 1);
-+                        update(context, msg);
-+                    }
-+                }
-+                if (processor != null) {
-+                    try {
-+                        msg.setQueueLastStartTime(new Date());
-+                        msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_PROCESSING);
-+                        msg.setQueueTimeout(DateUtils.addMinutes(new Date(), timeoutInMinutes));
-+                        update(context, msg);
-+                        ObjectMapper mapper = new ObjectMapper();
-+                        Notification notification = mapper.readValue(msg.getMessage(), Notification.class);
-+                        processor.process(context, notification);
-+                        msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_PROCESSED);
-+                        result = 1;
-+                    } catch (JsonSyntaxException jse) {
-+                        result = -1;
-+                        log.error("Unable to read JSON notification from LdnMessage " + msg, jse);
-+                        msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_FAILED);
-+                    } catch (Exception e) {
-+                        result = -1;
-+                        log.error(e);
-+                        msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_FAILED);
-+                    } finally {
-+                        msg.setQueueAttempts(msg.getQueueAttempts() + 1);
-+                        update(context, msg);
-+                    }
++        int count = 0;
++        int timeoutInMinutes = configurationService.getIntProperty("ldn.processor.queue.msg.timeout", 60);
++
++        List<LDNMessageEntity> messages = findOldestMessagesToProcess(context);
++        messages.addAll(findMessagesToBeReprocessed(context));
++
++        Optional<LDNMessageEntity> msgOpt = getSingleMessageEntity(messages);
++
++        while (msgOpt.isPresent()) {
++            LDNProcessor processor = null;
++            LDNMessageEntity msg = msgOpt.get();
++            processor = ldnRouter.route(msg);
++            try {
++                boolean isServiceDisabled = !isServiceEnabled(msg);
++                if (processor == null || isServiceDisabled) {
++                    log.warn("No processor found for LDN message " + msg);
++                    Integer status = isServiceDisabled ? LDNMessageEntity.QUEUE_STATUS_UNTRUSTED
++                        : LDNMessageEntity.QUEUE_STATUS_UNMAPPED_ACTION;
++                    msg.setQueueStatus(status);
++                    msg.setQueueAttempts(msg.getQueueAttempts() + 1);
++                    update(context, msg);
 +                } else {
-+                    log.info("Found x" + msgs.size() + " LDN messages but none processor found.");
++                    msg.setQueueLastStartTime(new Date());
++                    msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_PROCESSING);
++                    msg.setQueueTimeout(DateUtils.addMinutes(new Date(), timeoutInMinutes));
++                    update(context, msg);
++                    ObjectMapper mapper = new ObjectMapper();
++                    Notification notification = mapper.readValue(msg.getMessage(), Notification.class);
++                    processor.process(context, notification);
++                    msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_PROCESSED);
++                    count++;
 +                }
++            } catch (JsonSyntaxException jse) {
++                log.error("Unable to read JSON notification from LdnMessage " + msg, jse);
++                msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_FAILED);
++            } catch (Exception e) {
++                log.error(e);
++                msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_FAILED);
++            } finally {
++                msg.setQueueAttempts(msg.getQueueAttempts() + 1);
++                update(context, msg);
 +            }
-+        } catch (SQLException e) {
-+            result = -1;
-+            log.error(e);
++
++            messages = findOldestMessagesToProcess(context);
++            messages.addAll(findMessagesToBeReprocessed(context));
++            msgOpt = getSingleMessageEntity(messages);
 +        }
-+        return result;
++        return count;
++    }
++
++    private boolean isServiceEnabled(LDNMessageEntity msg) {
++        String localInboxUrl = configurationService.getProperty("ldn.notify.inbox");
++        if (msg.getTarget() == null || StringUtils.equals(msg.getTarget().getLdnUrl(), localInboxUrl)) {
++            return msg.getOrigin().isEnabled();
++        }
++        return msg.getTarget().isEnabled();
 +    }
 +
 +    @Override
-+    public int checkQueueMessageTimeout(Context context) {
-+        int result = 0;
-+        int timeoutInMinutes = configurationService.getIntProperty("ldn.processor.queue.msg.timeout");
-+        if (timeoutInMinutes == 0) {
-+            timeoutInMinutes = 60;
-+        }
-+        int maxAttempts = configurationService.getIntProperty("ldn.processor.max.attempts");
-+        if (maxAttempts == 0) {
-+            maxAttempts = 5;
-+        }
-+        log.debug("Using parameters: [timeoutInMinutes]=" + timeoutInMinutes + ",[maxAttempts]=" + maxAttempts);
++    public int checkQueueMessageTimeout(Context context) throws SQLException {
++        int count = 0;
++        int maxAttempts = configurationService.getIntProperty("ldn.processor.max.attempts", 5);
 +        /*
 +         * put failed on processing messages with timed-out timeout and
 +         * attempts >= configured_max_attempts put queue on processing messages with
 +         * timed-out timeout and attempts < configured_max_attempts
 +         */
-+        List<LDNMessageEntity> msgsToCheck = null;
-+        try {
-+            msgsToCheck = findProcessingTimedoutMessages(context);
-+        } catch (SQLException e) {
-+            result = -1;
-+            log.error("An error occured on searching for timedout LDN messages!", e);
-+            return result;
-+        }
-+        if (msgsToCheck == null || msgsToCheck.isEmpty()) {
-+            return result;
-+        }
-+        for (int i = 0; i < msgsToCheck.size() && msgsToCheck.get(i) != null; i++) {
-+            LDNMessageEntity msg = msgsToCheck.get(i);
++        Optional<LDNMessageEntity> msgOpt = getSingleMessageEntity(findProcessingTimedoutMessages(context));
++
++        while (msgOpt.isPresent()) {
++            LDNMessageEntity msg = msgOpt.get();
 +            try {
 +                if (msg.getQueueAttempts() >= maxAttempts) {
 +                    msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_FAILED);
@@ -4658,13 +4726,17 @@ index 0000000000..20a7cb017f
 +                    msg.setQueueStatus(LDNMessageEntity.QUEUE_STATUS_QUEUED);
 +                }
 +                update(context, msg);
-+                result++;
++                count++;
 +            } catch (SQLException e) {
-+                log.error("Can't update LDN message " + msg);
-+                log.error(e);
++                log.error("Can't update LDN message " + msg, e);
 +            }
++            msgOpt = getSingleMessageEntity(findProcessingTimedoutMessages(context));
 +        }
-+        return result;
++        return count;
++    }
++
++    public Optional<LDNMessageEntity> getSingleMessageEntity(Collection<LDNMessageEntity> messages) {
++        return messages.stream().findFirst();
 +    }
 +
 +    @Override
@@ -4709,6 +4781,12 @@ index 0000000000..20a7cb017f
 +
 +    public void delete(Context context, LDNMessageEntity ldnMessage) throws SQLException {
 +        ldnMessageDao.delete(context, ldnMessage);
++    }
++
++    @Override
++    public boolean isTargetCurrent(Notification notification) {
++        String localInboxUrl = configurationService.getProperty("ldn.notify.inbox");
++        return StringUtils.equals(notification.getTarget().getInbox(), localInboxUrl);
 +    }
 +
 +}
@@ -15913,10 +15991,10 @@ index 0000000000..1ed3694573
 \ No newline at end of file
 diff --git a/dspace-api/src/test/java/org/dspace/builder/NotifyServiceBuilder.java b/dspace-api/src/test/java/org/dspace/builder/NotifyServiceBuilder.java
 new file mode 100644
-index 0000000000..9c8de62d8b
+index 0000000000..e71dbb211e
 --- /dev/null
 +++ b/dspace-api/src/test/java/org/dspace/builder/NotifyServiceBuilder.java
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,154 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -16042,6 +16120,11 @@ index 0000000000..9c8de62d8b
 +
 +    public NotifyServiceBuilder withLdnUrl(String ldnUrl) {
 +        notifyServiceEntity.setLdnUrl(ldnUrl);
++        return this;
++    }
++
++    public NotifyServiceBuilder withStatus(boolean enabled) {
++        notifyServiceEntity.setEnabled(enabled);
 +        return this;
 +    }
 +
@@ -21782,10 +21865,10 @@ index 0000000000..d8c8cfaf15
 +}
 diff --git a/dspace-server-webapp/src/main/java/org/dspace/app/rest/repository/NotifyServiceRestRepository.java b/dspace-server-webapp/src/main/java/org/dspace/app/rest/repository/NotifyServiceRestRepository.java
 new file mode 100644
-index 0000000000..2034a07512
+index 0000000000..972f0944f3
 --- /dev/null
 +++ b/dspace-server-webapp/src/main/java/org/dspace/app/rest/repository/NotifyServiceRestRepository.java
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,212 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -21801,6 +21884,7 @@ index 0000000000..2034a07512
 +import java.sql.SQLException;
 +import java.util.ArrayList;
 +import java.util.List;
++import java.util.stream.Collectors;
 +import javax.servlet.ServletInputStream;
 +import javax.servlet.http.HttpServletRequest;
 +
@@ -21981,7 +22065,10 @@ index 0000000000..2034a07512
 +        Pageable pageable) {
 +        try {
 +            List<NotifyServiceEntity> notifyServiceEntities =
-+                notifyService.findManualServicesByInboundPattern(obtainContext(), pattern);
++                notifyService.findManualServicesByInboundPattern(obtainContext(), pattern)
++                .stream()
++                .filter(NotifyServiceEntity::isEnabled)
++                .collect(Collectors.toList());
 +
 +            return converter.toRestPage(notifyServiceEntities, pageable, utils.obtainProjection());
 +        } catch (SQLException e) {
@@ -27672,10 +27759,10 @@ index 0000000000..d6ae2e1aa0
 \ No newline at end of file
 diff --git a/dspace-server-webapp/src/test/java/org/dspace/app/rest/LDNInboxControllerIT.java b/dspace-server-webapp/src/test/java/org/dspace/app/rest/LDNInboxControllerIT.java
 new file mode 100644
-index 0000000000..5070d54b00
+index 0000000000..d36b17f8ad
 --- /dev/null
 +++ b/dspace-server-webapp/src/test/java/org/dspace/app/rest/LDNInboxControllerIT.java
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,418 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -27793,6 +27880,7 @@ index 0000000000..5070d54b00
 +                                .withUrl("https://review-service.com/inbox/about/")
 +                                .withLdnUrl("https://review-service.com/inbox/")
 +                                .withScore(BigDecimal.valueOf(0.6d))
++                                .withStatus(true)
 +                                .withLowerIp("127.0.0.1")
 +                                .withUpperIp("127.0.0.3")
 +                                .build();
@@ -27847,6 +27935,7 @@ index 0000000000..5070d54b00
 +                                .withUrl("https://review-service.com/inbox/about/")
 +                                .withLdnUrl("https://review-service.com/inbox/")
 +                                .withScore(BigDecimal.valueOf(0.6d))
++                                .withStatus(true)
 +                                .withLowerIp("127.0.0.1")
 +                                .withUpperIp("127.0.0.3")
 +                                .build();
@@ -27904,6 +27993,7 @@ index 0000000000..5070d54b00
 +                                .withUrl("https://review-service.com/inbox/about/")
 +                                .withLdnUrl("https://review-service.com/inbox/")
 +                                .withScore(BigDecimal.valueOf(0.6d))
++                                .withStatus(true)
 +                                .withLowerIp("127.0.0.1")
 +                                .withUpperIp("127.0.0.3")
 +                                .build();
@@ -28515,10 +28605,10 @@ index 0000000000..8b9cf3e066
 +}
 diff --git a/dspace-server-webapp/src/test/java/org/dspace/app/rest/NotifyRequestStatusRestControllerIT.java b/dspace-server-webapp/src/test/java/org/dspace/app/rest/NotifyRequestStatusRestControllerIT.java
 new file mode 100644
-index 0000000000..a7077f20da
+index 0000000000..65881c5609
 --- /dev/null
 +++ b/dspace-server-webapp/src/test/java/org/dspace/app/rest/NotifyRequestStatusRestControllerIT.java
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,203 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -28583,6 +28673,7 @@ index 0000000000..a7077f20da
 +                                .withDescription("service description")
 +                                .withUrl("https://review-service.com/inbox/about/")
 +                                .withLdnUrl("https://review-service.com/inbox/")
++                                .withStatus(true)
 +                                .withScore(BigDecimal.valueOf(0.6d))
 +                                .build();
 +        //SEND OFFER REVIEW
@@ -28618,6 +28709,41 @@ index 0000000000..a7077f20da
 +    }
 +
 +    @Test
++    public void oneStatusAnnounceEndorsementTestDisabledService() throws Exception {
++        context.turnOffAuthorisationSystem();
++        Community community = CommunityBuilder.createCommunity(context).withName("community").build();
++        Collection collection = CollectionBuilder.createCollection(context, community).build();
++        Item item = ItemBuilder.createItem(context, collection).build();
++        String object = configurationService.getProperty("dspace.ui.url") + "/handle/" + item.getHandle();
++        NotifyServiceEntity notifyServiceEntity = NotifyServiceBuilder.createNotifyServiceBuilder(context)
++                                .withName("service name")
++                                .withDescription("service description")
++                                .withUrl("https://review-service.com/inbox/about/")
++                                .withLdnUrl("https://review-service.com/inbox/")
++                                .withStatus(false) // service is disabled
++                                .withScore(BigDecimal.valueOf(0.6d))
++                                .build();
++        //SEND OFFER REVIEW
++        InputStream offerReviewStream = getClass().getResourceAsStream("ldn_offer_review3.json");
++        String announceReview = IOUtils.toString(offerReviewStream, Charset.defaultCharset());
++        offerReviewStream.close();
++        String message = announceReview.replaceAll("<<object_handle>>", object);
++        ObjectMapper mapper = new ObjectMapper();
++        Notification notification = mapper.readValue(message, Notification.class);
++        getClient()
++            .perform(post("/ldn/inbox")
++                .contentType("application/ld+json")
++                .content(message))
++            .andExpect(status().isAccepted());
++
++        int processed = ldnMessageService.extractAndProcessMessageFromQueue(context);
++        assertEquals(processed, 0);
++        processed = ldnMessageService.extractAndProcessMessageFromQueue(context);
++        assertEquals(processed, 0);
++
++    }
++
++    @Test
 +    public void oneStatusRejectedTest() throws Exception {
 +        context.turnOffAuthorisationSystem();
 +        Community community = CommunityBuilder.createCommunity(context).withName("community").build();
@@ -28629,6 +28755,7 @@ index 0000000000..a7077f20da
 +                                .withDescription("service description")
 +                                .withUrl("https://review-service.com/inbox/about/")
 +                                .withLdnUrl("https://review-service.com/inbox/")
++                                .withStatus(true)
 +                                .withScore(BigDecimal.valueOf(0.6d))
 +                                .build();
 +        //SEND OFFER REVIEW
@@ -28687,10 +28814,10 @@ index 0000000000..a7077f20da
 +}
 diff --git a/dspace-server-webapp/src/test/java/org/dspace/app/rest/NotifyServiceRestRepositoryIT.java b/dspace-server-webapp/src/test/java/org/dspace/app/rest/NotifyServiceRestRepositoryIT.java
 new file mode 100644
-index 0000000000..583084f8a3
+index 0000000000..a20f3b10ad
 --- /dev/null
 +++ b/dspace-server-webapp/src/test/java/org/dspace/app/rest/NotifyServiceRestRepositoryIT.java
-@@ -0,0 +1,2492 @@
+@@ -0,0 +1,2495 @@
 +/**
 + * The contents of this file are subject to the license and copyright
 + * detailed in the LICENSE and NOTICE files at the root of the source
@@ -30798,6 +30925,7 @@ index 0000000000..583084f8a3
 +                                .withName("service name one")
 +                                .withDescription("service description one")
 +                                .withUrl("https://service.ldn.org/about")
++                                .withStatus(true)
 +                                .withLdnUrl("https://service.ldn.org/inbox")
 +                                .build();
 +
@@ -30806,6 +30934,7 @@ index 0000000000..583084f8a3
 +                                .withName("service name two")
 +                                .withDescription("service description two")
 +                                .withUrl("https://service2.ldn.org/about")
++                                .withStatus(true)
 +                                .withLdnUrl("https://service2.ldn.org/inbox")
 +                                .build();
 +
@@ -30814,6 +30943,7 @@ index 0000000000..583084f8a3
 +                                .withName("service name three")
 +                                .withDescription("service description")
 +                                .withUrl("https://service3.ldn.org/about")
++                                .withStatus(true)
 +                                .withLdnUrl("https://service3.ldn.org/inbox")
 +                                .build();
 +
@@ -36558,7 +36688,7 @@ index 0000000000..ed19159db8
 \ No newline at end of file
 diff --git a/dspace-server-webapp/src/test/resources/org/dspace/app/rest/ldn_announce_release.json b/dspace-server-webapp/src/test/resources/org/dspace/app/rest/ldn_announce_release.json
 new file mode 100644
-index 0000000000..6669628d92
+index 0000000000..6c3dce8c7a
 --- /dev/null
 +++ b/dspace-server-webapp/src/test/resources/org/dspace/app/rest/ldn_announce_release.json
 @@ -0,0 +1,49 @@
@@ -36592,7 +36722,7 @@ index 0000000000..6669628d92
 +    "as:object": "newValue",
 +    "oldas:relationship": "http://purl.org/vocab/frbr/core#supplement",    
 +    "as:relationship": "somethingElse",
-+    "as:subject": "https://research-organisation.org/repository/item/201203/421/",    
++    "as:subject": "<<object_handle>>",    
 +	"id": "<<object_handle>>",
 +    "type": "Relationship"
 +  },
@@ -36867,6 +36997,52 @@ index 0000000000..973ea946f6
 +    "type": "Person"
 +  },
 +  "id": "urn:uuid:0370c0fb-bb78-4a9b-87f5-bed307a509df",
++  "object": {
++    "id": "<<object_handle>>",
++    "ietf:cite-as": "https://doi.org/10.5555/12345680",
++    "type": "sorg:AboutPage",
++    "ietf:item": {
++      "id": "url.pdf",
++      "mediaType": "applicationpdf",
++      "type": [
++        "Article",
++        "sorg:ScholarlyArticle"
++      ]
++    }
++  },
++  "origin": {
++    "id": "https://research-organisation.org/repository",
++    "inbox": "https://review-service.com/inbox/",
++    "type": "Service"
++  },
++  "target": {
++    "id": "https://review-service.com/system",
++    "inbox": "https://review-service.com/inbox/",
++    "type": "Service"
++  },
++  "type": [
++    "Offer",
++    "coar-notify:ReviewAction"
++  ]
++}
+\ No newline at end of file
+diff --git a/dspace-server-webapp/src/test/resources/org/dspace/app/rest/ldn_offer_review3.json b/dspace-server-webapp/src/test/resources/org/dspace/app/rest/ldn_offer_review3.json
+new file mode 100644
+index 0000000000..5b857fa664
+--- /dev/null
++++ b/dspace-server-webapp/src/test/resources/org/dspace/app/rest/ldn_offer_review3.json
+@@ -0,0 +1,39 @@
++{
++  "@context": [
++    "https://www.w3.org/ns/activitystreams",
++    "https://purl.org/coar/notify"
++  ],
++  "actor": {
++    "id": "https://orcid.org/0000-0002-1825-0097",
++    "name": "Josiah Carberry",
++    "type": "Person"
++  },
++  "id": "urn:uuid:0370c0fb-bb78-4a9b-87f5-bed308a509da",
 +  "object": {
 +    "id": "<<object_handle>>",
 +    "ietf:cite-as": "https://doi.org/10.5555/12345680",
@@ -37372,6 +37548,75 @@ index 1060a33031..1c14df273c 100644
          </submission-process>
      </submission-definitions>
  
+diff --git a/dspace/config/ldn/announce-relationship b/dspace/config/ldn/announce-relationship
+new file mode 100644
+index 0000000000..205a61adb4
+--- /dev/null
++++ b/dspace/config/ldn/announce-relationship
+@@ -0,0 +1,62 @@
++## generate LDN message json when request-review of an item
++##
++## Parameters: {0} config 'dspace.ui.url'
++##             {1} config 'ldn.notify.inbox'
++##             {2} config 'dspace.name'
++##             {3} Notify Service url
++##             {4} Notify Service ldnUrl
++##             {5} 'dspace.ui.url'/handle/xxxx/yyy
++##             {6} metadata value of 'dc.identifier.uri'
++##             {7} the url to the primary bitstream or the first bitstream in the ORIGINAL bundle if there is no primary bitstream. The url is 'dspace.ui.url'/bitstreams/:uuid/download
++##             {8} the bitstream  MimeType or get User Format MimeType if getFormat is 'Unknown'
++##             {9} id of the created LDNMessage
++##            {10} uri of the related resource
++##            {11} relationship type, i.e. http://purl.org/vocab/frbr/core#supplement
++##            {12} urn:uuid of the relation (randomly generated)
++
++{
++  "@context": [
++    "https://www.w3.org/ns/activitystreams",
++    "https://purl.org/coar/notify"
++  ],
++  "actor": {
++    "id": "${params[0]}",
++    "name": "${params[2]}",
++    "type": "Service"
++  },
++  "context": {
++    "id": "${params[5]}",
++    "ietf:cite-as": "${params[6]}",
++    "ietf:item": {
++      "id": "${params[7]}",
++      "mediaType": "${params[8]}",
++      "type": [
++        "Article",
++        "sorg:ScholarlyArticle"
++      ]
++    },
++    "type": "sorg:AboutPage"
++  },
++  "id": "${params[9]}",
++  "object": {
++    "as:object": "${params[10]}",
++    "as:relationship": "${params[11]}",
++    "as:subject": "${params[5]}",
++    "id": "${params[12]}",
++    "type": "Relationship"
++  },
++  "origin": {
++    "id": "${params[0]}",
++    "inbox": "${params[1]}",
++    "type": "Service"
++  },
++  "target": {
++    "id": "${params[3]}",
++    "inbox": "${params[4]}",
++    "type": "Service"
++  },
++  "type": [
++    "Announce",
++    "coar-notify:RelationshipAction"
++  ]
++}
+\ No newline at end of file
 diff --git a/dspace/config/ldn/request-endorsement b/dspace/config/ldn/request-endorsement
 new file mode 100644
 index 0000000000..443a702915
@@ -37567,10 +37812,10 @@ index 7176ed275a..239e0f4757 100644
 +ldn.enabled = true
 diff --git a/dspace/config/modules/ldn.cfg b/dspace/config/modules/ldn.cfg
 new file mode 100644
-index 0000000000..4187e143fd
+index 0000000000..4979d265cc
 --- /dev/null
 +++ b/dspace/config/modules/ldn.cfg
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,54 @@
 +#---------------------------------------------------------------#
 +#---------------COAR NOTIFY LDN CONFIGURATION-------------------#
 +#---------------------------------------------------------------#
@@ -37617,6 +37862,9 @@ index 0000000000..4187e143fd
 +# Blocks the storage of incoming LDN messages with known Notify Service (origin)
 +# and out-of-range IP
 +ldn.notify.inbox.block-untrusted-ip = true
++
++# this is the medatada used to retrieve the relation with external items when sending relationship requests
++#ldn.notify.relation.metadata = dc.relation
 +
 +
 +# EMAIL CONFIGURATION
@@ -38754,10 +39002,10 @@ index 24c463fb53..677357a93e 100644
  </beans>
 diff --git a/dspace/config/spring/api/ldn-coar-notify.xml b/dspace/config/spring/api/ldn-coar-notify.xml
 new file mode 100644
-index 0000000000..fcda57a10d
+index 0000000000..2329925a54
 --- /dev/null
 +++ b/dspace/config/spring/api/ldn-coar-notify.xml
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,340 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +<!-- The contents of this file are subject to the license and copyright detailed 
 +    in the LICENSE and NOTICE files at the root of the source tree and available 
@@ -38924,6 +39172,15 @@ index 0000000000..fcda57a10d
 +                    </key>
 +                    <ref bean="outcomingAnnounceIngestAction" />
 +                </entry>
++                <entry>
++                    <key>
++                        <set>
++                            <value>Announce</value>
++                            <value>coar-notify:RelationshipAction</value>
++                        </set>
++                    </key>
++                    <ref bean="outcomingAnnounceRelationAction" />
++                </entry>
 +            </map>
 +        </property>
 +    </bean>
@@ -39026,6 +39283,14 @@ index 0000000000..fcda57a10d
 +    </bean>
 +
 +    <bean name="outcomingAnnounceReviewAction" class="org.dspace.app.ldn.processor.LDNMetadataProcessor">
++        <property name="actions">
++            <list value-type="org.dspace.app.ldn.action.LDNAction">
++                <bean class="org.dspace.app.ldn.action.SendLDNMessageAction"/>
++            </list>
++        </property>
++    </bean>
++
++    <bean name="outcomingAnnounceRelationAction" class="org.dspace.app.ldn.processor.LDNMetadataProcessor">
 +        <property name="actions">
 +            <list value-type="org.dspace.app.ldn.action.LDNAction">
 +                <bean class="org.dspace.app.ldn.action.SendLDNMessageAction"/>
